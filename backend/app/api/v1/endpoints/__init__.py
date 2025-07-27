@@ -9,6 +9,8 @@ from .arbitrage import router as arbitrage_router
 from .trades import router as trade_router
 from .performance import router as performance_router
 from .dashboard import router as dashboard_router
+from .fees import router as fees_router
+from .margin import router as margin_router
 
 api_router = APIRouter()
 
@@ -20,3 +22,5 @@ api_router.include_router(arbitrage_router)
 api_router.include_router(trade_router)
 api_router.include_router(performance_router)
 api_router.include_router(dashboard_router)
+api_router.include_router(fees_router)
+api_router.include_router(margin_router)

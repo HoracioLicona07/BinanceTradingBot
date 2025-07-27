@@ -89,3 +89,23 @@ class BinanceClient:
         except Exception as e:
             print(f"[ERROR get_symbol_info] {e}")
         return None
+
+    def get_trade_fees(self, symbol: str | None = None):
+        """Obtiene las comisiones de trading (maker/taker)."""
+        try:
+            return self.client.get_trade_fee(symbol=symbol)
+        except BinanceAPIException as e:
+            print(f"[ERROR Binance API] {e.message}")
+        except Exception as e:
+            print(f"[ERROR General] {e}")
+        return None
+
+    def get_cross_margin_interest(self, asset: str | None = None):
+        """Devuelve las tasas de interés de cross margin."""
+        try:
+            return self.client.get_margin_interest_rate_history(asset=asset)
+        except BinanceAPIException as e:
+            print(f"[ERROR Binance API] {e.message}")
+        except Exception as e:
+            print(f"[ERROR General] {e}")
+        return None
