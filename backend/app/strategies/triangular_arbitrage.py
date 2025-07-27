@@ -1,56 +1,171 @@
-# backend/app/strategies/triangular_arbitrage.py
+"""Triangular arbitrage strategy using WebSocket order book updates."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from collections import defaultdict
+from typing import Dict, List
+
+import aiohttp
+from loguru import logger
 
 from app.strategies.base import BaseStrategy
-from loguru import logger
+from app.strategies.triangular import (
+    build_graph,
+    find_cycles,
+    route_factor,
+    is_profitable,
+)
+
+# Strategy parameters
+TOP_N_PAIRS = 300
+BOOK_LIMIT = 100
+PROFIT_THOLD = 1e-4
+HOLD_SECONDS = 90
+LIVE = False
+SLEEP_BETWEEN = 5
+QUANTUMS_USDT = [50, 100, 250, 500, 1000, 2500, 5000]
+
+
+class DepthStream:
+    """Lightweight Binance depth WebSocket."""
+
+    def __init__(self, symbols: List[str], callback):
+        self.symbols = [s.lower() for s in symbols]
+        self.callback = callback
+        streams = "/".join(f"{s}@depth@100ms" for s in self.symbols)
+        self.url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+
+    async def run(self):
+        logger.info(f"🌐 Conectando a {self.url}")
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(self.url) as ws:
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        stream = data.get("stream", "")
+                        symbol = stream.split("@")[0].upper()
+                        book = data.get("data", {})
+                        await self.callback(symbol, book)
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        logger.error(f"WebSocket error: {msg.data}")
+                        break
 
 
 class TriangularArbitrage(BaseStrategy):
-    """
-    Estrategia de arbitraje triangular básica:
-    A -> B -> C -> A
-    Requiere tres símbolos que cierren el ciclo.
-    """
+    """Scan Binance for triangular arbitrage opportunities."""
 
     def __init__(self, config, executor):
         super().__init__(config, executor)
+        self.books: Dict[str, dict] = {}
+        self.symbols: List[str] = []
+        self.coins: List[str] = []
+        self.balances: defaultdict[str, float] = defaultdict(float)
+        self._commission_cache: Dict[str, float] = {}
+        self._interest_cache: Dict[str, float] = {}
 
-        self.symbol_ab = config.params.get("symbol_ab", "BTCUSDT")
-        self.symbol_bc = config.params.get("symbol_bc", "USDTETH")
-        self.symbol_ca = config.params.get("symbol_ca", "ETHBTC")
+    # ---------------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------------
+    def _fee_of(self, symbol: str) -> float:
+        if symbol in self._commission_cache:
+            return self._commission_cache[symbol]
+        try:
+            data = self.client.client.get_trade_fee(symbol=symbol)
+            taker = float(data[0].get("taker", data[0].get("takerCommission", 0.001)))
+        except Exception as exc:
+            logger.warning(f"No pude obtener comisiones de {symbol} ({exc}); uso 0.001")
+            taker = 0.001
+        self._commission_cache[symbol] = taker
+        return taker
 
-        self.threshold = float(config.params.get("threshold", 0.5))  # % mínimo de ganancia
-        self.start_quantity = float(config.quantity or 0.001)
+    def _hourly_interest(self, asset: str) -> float:
+        return self._interest_cache.setdefault(asset, 0.0)
+
+    def _account_balances(self) -> Dict[str, float]:
+        info = self.client.get_account_info() or {}
+        balances = info.get("balances", [])
+        return {b["asset"]: float(b["free"]) for b in balances if float(b["free"]) > 0}
+
+    def _top_symbols(self, n: int) -> List[str]:
+        tickers = self.client.client.get_ticker_24hr()
+        tickers.sort(key=lambda d: float(d.get("quoteVolume", 0)), reverse=True)
+        return [d["symbol"] for d in tickers[:n]]
+
+    def _exchange_map(self) -> Dict[str, tuple[str, str]]:
+        info = self.client.client.get_exchange_info()
+        return {
+            s["symbol"]: (s["baseAsset"], s["quoteAsset"])
+            for s in info.get("symbols", [])
+            if s.get("status") == "TRADING"
+        }
+
+    def _snapshot_books(self, symbols: List[str]) -> Dict[str, dict]:
+        return {sym: self.client.client.get_order_book(symbol=sym, limit=BOOK_LIMIT) for sym in symbols}
+
+    # ---------------------------------------------------------------
+    def _prepare(self):
+        sym_map = self._exchange_map()
+        self.symbols = self._top_symbols(TOP_N_PAIRS)
+        self.coins = list({c for s in self.symbols if s in sym_map for c in sym_map[s]})
+        self.books = self._snapshot_books(self.symbols)
+        self.balances = defaultdict(float, self._account_balances())
+
+    def _build_routes(self) -> List[List[str]]:
+        graph = build_graph(self.books, self._exchange_map())
+        routes = find_cycles(graph, self.coins, max_hops=4)
+        return routes
+
+    def _evaluate(self, routes: List[List[str]]):
+        for route in routes:
+            first_asset = route[0]
+            px = None
+            quants = QUANTUMS_USDT
+            if first_asset != "USDT":
+                if f"{first_asset}USDT" in self.books:
+                    px = float(self.books[f"{first_asset}USDT"]["bids"][0][0])
+                elif f"USDT{first_asset}" in self.books:
+                    px = 1 / float(self.books[f"USDT{first_asset}"]["asks"][0][0])
+                else:
+                    continue
+                quants = [q / px for q in QUANTUMS_USDT]
+            for qty in quants:
+                factor, jumps = route_factor(
+                    self.books, route, qty, self._fee_of, self._hourly_interest
+                )
+                if factor == 0:
+                    continue
+                if is_profitable(factor, PROFIT_THOLD):
+                    gain_pct = (factor - 1) * 100
+                    usd_equiv = qty if first_asset == "USDT" else qty * (px or 0)
+                    jump_str = " → ".join(f"{j.src}->{j.dst}" for j in jumps)
+                    logger.success(
+                        f"💰 Ruta {jump_str} | size≈{usd_equiv:.0f} USDT | +{gain_pct:.3f}%"
+                    )
+                    if LIVE:
+                        logger.warning("🔴 LIVE no implementado")
+                else:
+                    break
+
+    async def _on_depth(self, symbol: str, data: dict):
+        if "bids" in data and "asks" in data:
+            self.books[symbol] = {"bids": data["bids"], "asks": data["asks"]}
+            routes = self._build_routes()
+            self._evaluate(routes)
+
+    async def _scan(self):
+        self._prepare()
+        stream = DepthStream(self.symbols, self._on_depth)
+        await stream.run()
 
     def run(self):
-        logger.info(f"🔺 Ejecutando arbitraje triangular: {self.symbol_ab} → {self.symbol_bc} → {self.symbol_ca}")
-
+        logger.info("🔺 Escaneo de arbitraje triangular (WS)")
+        start = time.time()
         try:
-            # Paso 1: A -> B
-            price_ab = float(self.client.get_price(self.symbol_ab)["price"])  # A en B
-            # Paso 2: B -> C
-            price_bc = float(self.client.get_price(self.symbol_bc)["price"])  # B en C
-            # Paso 3: C -> A
-            price_ca = float(self.client.get_price(self.symbol_ca)["price"])  # C en A
-
-            # Calcular resultado final si ejecutamos el ciclo completo
-            amount_b = self.start_quantity * price_ab          # A → B
-            amount_c = amount_b / price_bc                    # B → C
-            final_a = amount_c * price_ca                     # C → A
-
-            gain_percent = ((final_a - self.start_quantity) / self.start_quantity) * 100
-
-            logger.info(f"🔄 Resultado A final: {final_a:.6f}, Ganancia: {gain_percent:.2f}%")
-
-            if gain_percent >= self.threshold:
-                logger.success("🟢 Oportunidad detectada: Ejecutar ciclo triangular")
-
-                # Aquí podrías usar self.executor para ejecutar las tres órdenes
-                # self.executor.buy_market(self.symbol_ab, self.start_quantity)
-                # self.executor.sell_market(self.symbol_bc, amount_b)
-                # self.executor.sell_market(self.symbol_ca, amount_c)
-
-                logger.warning("⚠️ Orden real omitida: simulado para pruebas. Descomenta para operar en vivo.")
-            else:
-                logger.info("⏸️ No hay ganancia suficiente para arbitraje triangular.")
-        except Exception as e:
-            logger.error(f"❌ Error al ejecutar arbitraje triangular: {e}")
+            asyncio.run(self._scan())
+        except Exception as exc:
+            logger.error(f"Error en arbitraje triangular: {exc}")
+        finally:
+            logger.info("⏱️ Duración %.2fs", time.time() - start)
