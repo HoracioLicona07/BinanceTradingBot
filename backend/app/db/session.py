@@ -25,7 +25,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # Base para los modelos ORM
 Base = declarative_base()
 
-# Dependencia para usar en endpoints
+# Dependencia para FastAPI
 def get_db():
     """
     Dependency para obtener la sesión de base de datos en endpoints o servicios.
@@ -36,3 +36,10 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# Sesión directa para scripts como run_bot.py
+def get_db_session():
+    """
+    Devuelve una sesión directa (no generador) para usar fuera de FastAPI.
+    """
+    return SessionLocal()

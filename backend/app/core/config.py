@@ -3,7 +3,7 @@ import yaml
 from pathlib import Path
 from dotenv import load_dotenv
 
-# ✅ Arreglo de ruta incorrecta a .env
+# ✅ Cargar correctamente .env desde la raíz del backend
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 ENV_PATH = BASE_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
@@ -18,6 +18,7 @@ class Settings:
 
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY")
     BINANCE_API_SECRET: str = os.getenv("BINANCE_API_SECRET")
+    BINANCE_BASE_URL: str = os.getenv("BINANCE_BASE_URL")  # ✅ AÑADIDO AQUÍ
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 

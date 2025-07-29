@@ -10,7 +10,7 @@ class BinanceWebSocketClient:
         self.symbol = symbol.lower()
         self.interval = interval
         self.callback = callback
-        self.ws_url = f"wss://stream.binance.com:9443/ws/{self.symbol}@kline_{self.interval}"
+        self.ws_url = f"wss://testnet.binance.vision/ws/{self.symbol}@kline_{self.interval}"
 
     async def connect(self):
         """
