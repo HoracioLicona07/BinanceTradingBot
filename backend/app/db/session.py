@@ -7,6 +7,12 @@ from app.core.config import settings
 # Conexión a la base de datos
 DATABASE_URL = settings.DATABASE_URL
 
+# Validación explícita
+if not DATABASE_URL or not DATABASE_URL.startswith("postgresql"):
+    raise ValueError(f"❌ DATABASE_URL inválida o vacía: '{DATABASE_URL}'")
+
+print("🔗 Conectando a la base de datos con URL:", DATABASE_URL)
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,

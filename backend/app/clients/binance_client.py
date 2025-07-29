@@ -8,8 +8,16 @@ import time
 from urllib.parse import urlencode
 from app.core.logger import logger
 from dotenv import load_dotenv
+from app.core.config import settings
 
-load_dotenv()  # Asegura que se carguen variables .env si no están cargadas aún
+class BinanceRestClient:
+    def __init__(self):
+        self.base_url = settings.BINANCE_BASE_URL
+        self.api_key = settings.BINANCE_API_KEY
+        self.api_secret = settings.BINANCE_API_SECRET
+
+
+#load_dotenv()  # Asegura que se carguen variables .env si no están cargadas aún
 
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
